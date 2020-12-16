@@ -1,0 +1,95 @@
+plugins {
+    id "java-library"
+    id "application"
+  //  id "org.javamodularity.moduleplugin" version "1.7.0"
+}
+
+group "net.consensys.tessera"
+version "1.0-SNAPSHOT"
+
+sourceCompatibility = 11
+targetCompatibility = 11
+
+repositories {
+    jcenter()
+    mavenCentral()
+    mavenLocal()
+    maven { url "https://hyperledger-org.bintray.com/besu-repo" }
+    maven { url "https://consensys.bintray.com/pegasys-repo" }
+    maven { url "https://repo.spring.io/libs-release" }
+    maven { url "https://dl.bintray.com/open-telemetry/maven" }
+}
+application {
+    applicationName = "migrate"
+    mainClass = "net.consensys.tessera.migration.data.Main"
+   // mainModule = "orion.to.tessera.data"
+    applicationDefaultJvmArgs = []
+    startScripts.enabled = true
+}
+task allDeps(type: DependencyReportTask) {}
+
+
+dependencies {
+
+    implementation "info.picocli:picocli:4.0.4"
+
+    testImplementation "junit:junit:4.13"
+
+    testImplementation "org.assertj:assertj-core:3.18.0"
+    testImplementation "org.mockito:mockito-inline:3.4.4"
+
+    implementation("net.consensys.quorum.tessera:config:20.10.0") {
+        transitive = false
+    }
+
+    implementation("net.consensys.quorum.tessera:tessera-data:20.10.0") {
+        transitive = false
+    }
+    implementation("net.consensys.quorum.tessera:enclave-api:20.10.0") {
+        transitive = false
+    }
+    implementation("net.consensys.quorum.tessera:shared:20.10.0") {
+        transitive = false
+    }
+
+    implementation("net.consensys.quorum.tessera:encryption-api:20.10.0") {
+        transitive = false
+    }
+    implementation("net.consensys.quorum.tessera:encryption-jnacl:20.10.0")
+
+    implementation("net.consensys.quorum.tessera:argon2:20.10.0")
+
+    implementation("net.consensys.quorum.tessera:key-generation:20.10.0")
+
+    implementation "org.bouncycastle:bcpkix-jdk15on:1.64"
+    implementation "org.bouncycastle:bcprov-jdk15on:1.64"
+
+    testImplementation "org.bouncycastle:bcpkix-jdk15on:1.64"
+    testImplementation "org.bouncycastle:bcprov-jdk15on:1.64"
+
+    implementation("net.consensys:orion:20.10.0") {
+     //   transitive = false
+    }
+    implementation "com.fasterxml.jackson.core:jackson-databind:2.12.0"
+    implementation "com.fasterxml.jackson.dataformat:jackson-dataformat-cbor:2.12.0"
+    implementation "com.fasterxml.jackson.datatype:jackson-datatype-jdk8:2.12.0"
+    implementation "com.fasterxml.jackson.datatype:jackson-datatype-json-org:2.12.0"
+    implementation "com.fasterxml.jackson.datatype:jackson-datatype-jsr353:2.12.0"
+
+    implementation "org.iq80.leveldb:leveldb-api:0.12"
+    implementation "org.iq80.leveldb:leveldb:0.12"
+
+    implementation "org.glassfish:jakarta.json:1.1.6"
+
+    implementation "org.fusesource.leveldbjni:leveldbjni-all:1.8"
+    implementation "org.apache.tuweni:tuweni-bytes:1.1.0"
+    implementation "org.apache.tuweni:tuweni-crypto:1.1.0"
+
+    api "jakarta.validation:jakarta.validation-api:2.0.2"
+    implementation "org.hibernate.validator:hibernate-validator:6.1.6.Final"
+}
+
+test {
+    systemProperty("javax.xml.bind.JAXBContextFactory", "org.eclipse.persistence.jaxb.JAXBContextFactory")
+    systemProperty("javax.xml.bind.context.factory", "org.eclipse.persistence.jaxb.JAXBContextFactory")
+}
