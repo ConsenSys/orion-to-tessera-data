@@ -9,74 +9,52 @@ import com.fasterxml.jackson.datatype.jsr353.JSR353Module;
 import com.quorum.tessera.config.ArgonOptions;
 import com.quorum.tessera.config.EncryptorConfig;
 import com.quorum.tessera.config.EncryptorType;
-import com.quorum.tessera.config.PrivateKeyData;
 import com.quorum.tessera.config.keypairs.ConfigKeyPair;
 import com.quorum.tessera.config.keys.KeyEncryptor;
 import com.quorum.tessera.config.keys.KeyEncryptorFactory;
+import com.quorum.tessera.config.util.JaxbUtil;
 import com.quorum.tessera.data.EncryptedTransaction;
 import com.quorum.tessera.data.MessageHash;
 import com.quorum.tessera.enclave.EncodedPayload;
 import com.quorum.tessera.enclave.PayloadEncoder;
 import com.quorum.tessera.enclave.PrivacyMode;
-import com.quorum.tessera.encryption.Encryptor;
-import com.quorum.tessera.encryption.EncryptorFactory;
+import com.quorum.tessera.encryption.*;
 import com.quorum.tessera.key.generation.FileKeyGenerator;
 import com.quorum.tessera.passwords.PasswordReader;
 import net.consensys.orion.config.Config;
+import net.consensys.orion.enclave.EncryptedKey;
 import net.consensys.orion.enclave.EncryptedPayload;
-import net.consensys.orion.enclave.KeyStore;
-import net.consensys.orion.enclave.sodium.FileKeyStore;
-import net.consensys.orion.enclave.sodium.SodiumEnclave;
+import net.consensys.orion.enclave.QueryPrivacyGroupPayload;
+import org.apache.tuweni.crypto.sodium.Box;
 import org.iq80.leveldb.DB;
 import org.iq80.leveldb.DBIterator;
-import org.iq80.leveldb.Logger;
 import org.iq80.leveldb.Options;
 
 import javax.json.JsonObject;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.*;
+import java.util.stream.Collectors;
+
 
 import static org.fusesource.leveldbjni.JniDBFactory.factory;
 
 public class LevelDbInboundAdapter implements InboundAdapter {
-    @Override
-    public void doStuff() throws Exception {
-        Options options = new Options();
-        options.logger(new Logger() {
-            @Override
-            public void log(String s) {
-                System.out.println(s);
-            }
-        });
-        options.createIfMissing(true);
-        URI db = getClass().getResource("/routerdb").toURI();
 
-        DB levelDBStore = factory.open(Paths.get(db).toAbsolutePath().toFile(), options);
+    private Encryptor tesseraEncrpter = EncryptorFactory.newFactory("NACL").create();
 
-        ObjectMapper cborObjectMapper = JsonMapper.builder(new CBORFactory())
-                .addModule(new Jdk8Module())
-                .addModule(new JSR353Module())
-                .serializationInclusion(JsonInclude.Include.NON_NULL)
-                .build();
-
-        Config orionConfig = Config.load(Paths.get("/Users/mark/Projects/consensys/orion-to-tessera-data/build/resources/test/orion.conf"));
-        KeyStore keyStore = new FileKeyStore(orionConfig);
-
-        SodiumEnclave sodiumEnclave = new SodiumEnclave(keyStore);
-
-        OrionKeyHelper orionKeyHelper = OrionKeyHelper.from(orionConfig);
+    private KeyEncryptor keyEncryptor = KeyEncryptorFactory.newFactory().create(new EncryptorConfig() {
+        {
+            setType(EncryptorType.NACL);
+        }
+    });
 
 
-        Encryptor encryptor = EncryptorFactory.newFactory("NACL").create();
-        KeyEncryptor keyEncryptor = KeyEncryptorFactory.newFactory().create(new EncryptorConfig() {
-            {
-                setType(EncryptorType.NACL);
-            }
-        });
+    void doPasswordFileStuff(OrionKeyHelper orionKeyHelper) throws Exception {
 
         Iterator<String> it = orionKeyHelper.getPasswords().iterator();
         PasswordReader passwordReader = new PasswordReader() {
@@ -92,99 +70,211 @@ public class LevelDbInboundAdapter implements InboundAdapter {
 
         };
 
-        FileKeyGenerator keyGenerator = new FileKeyGenerator(encryptor, keyEncryptor, passwordReader);
-
-        Map<Path, byte[]> unlockedPrivateKeys = orionKeyHelper.unlockedPrivateKeys();
+        FileKeyGenerator keyGenerator = new FileKeyGenerator(tesseraEncrpter, keyEncryptor, passwordReader);
 
         Map<String, ConfigKeyPair> generatedKeyPairs = new HashMap<>();
 
         ArgonOptions argonOptions = new ArgonOptions();
         argonOptions.setAlgorithm("i");
         argonOptions.setIterations(3);
-        argonOptions.setMemory(268435456);
+        argonOptions.setMemory(1048576);
         argonOptions.setParallelism(4);
 
 
-        unlockedPrivateKeys.values().forEach(v -> {
-            PrivateKeyData privateKeyData = new PrivateKeyData();
-            privateKeyData.setArgonOptions(argonOptions);
-            privateKeyData.setValue(Base64.getEncoder().encodeToString(v));
+        for (Path p : orionKeyHelper.getConfig().publicKeys()) {
+
+            String existingFileName = p.toFile().getName().split("\\.")[0];
+            String filename = String.join("-", "tessera", existingFileName);
+            Files.deleteIfExists(Paths.get(filename.concat(".pub")));
+            Files.deleteIfExists(Paths.get(filename.concat(".key")));
+
+            Box.KeyPair keyPair = orionKeyHelper.findKeyPairByPublicKeyPath(p);
+
+            PublicKey publicKey = Optional.of(keyPair)
+                    .map(Box.KeyPair::publicKey)
+                    .map(Box.PublicKey::bytesArray)
+                    .map(PublicKey::from).get();
+
+            PrivateKey privateKey = PrivateKey.from(keyPair.secretKey().bytesArray());
+
+            KeyPair pair = new KeyPair(publicKey, privateKey);
+            String password = orionKeyHelper.findOriginalKeyPasswordByPublicKeyPath(p);
+
+            ConfigKeyPair configKeyPair = keyGenerator.createFromKeyPair(filename, argonOptions, pair, password.toCharArray());
+
+            String orionPublicKeyValue = Files.readString(p);
+            generatedKeyPairs.put(orionPublicKeyValue, configKeyPair);
+            System.out.println("KEY IS : " + orionPublicKeyValue);
+        }
+
+    }
+
+    @Override
+    public void doStuff() throws Exception {
+
+        Config orionConfig = Config.load(Paths.get("/Users/mark/Projects/consensys/orion-to-tessera-data/build/resources/test/orion.conf"));
+
+        OrionKeyHelper orionKeyHelper = OrionKeyHelper.from(orionConfig);
+
+        doPasswordFileStuff(orionKeyHelper);
+
+        Options options = new Options();
+        options.logger(s -> System.out.println(s));
+        options.createIfMissing(true);
+        URI db = getClass().getResource("/routerdb").toURI();
+
+        DB levelDBStore = factory.open(Paths.get(db).toAbsolutePath().toFile(), options);
+
+        ObjectMapper cborObjectMapper = JsonMapper.builder(new CBORFactory())
+                .addModule(new Jdk8Module())
+                .addModule(new JSR353Module())
+                .serializationInclusion(JsonInclude.Include.NON_NULL)
+                .build();
 
 
-
-        });
-
-//        for (Path p : unlockedPrivateKeys.keySet()) {
-//
-//            String existingFileName = p.toFile().getName().split("\\.")[0];
-//            String filename = String.join("-","tessera", existingFileName);
-//
-//            ConfigKeyPair configKeyPair = keyGenerator.generate(filename, argonOptions, null);
-//
-//            String orionPublicKeyValue = Files.readString(p);
-//            generatedKeyPairs.put(orionPublicKeyValue, configKeyPair);
-//            System.out.println("KEY IS : "+ orionPublicKeyValue);
-//        }
-
-
+        List<JsonObject> dodgeyList = new ArrayList<>();
         try (levelDBStore) {
 
-            DBIterator iterator = levelDBStore.iterator();
 
+            DBIterator it = levelDBStore.iterator();
+            List<QueryPrivacyGroupPayload> queryPrivacyGroupPayloads = new ArrayList<>();
+            for (it.seekToFirst(); it.hasNext(); it.next()) {
+                Map.Entry<byte[], byte[]> entry = it.peekNext();
+                byte[] keyData = entry.getKey();
+                byte[] valueData = entry.getValue();
+
+                JsonObject jsonObject = cborObjectMapper.readValue(valueData, JsonObject.class);
+
+                if (jsonObject.containsKey("addresses") && jsonObject.containsKey("privacyGroupId")) {
+                    System.out.print("=== Adding ===");
+                    JsonUtil.prettyPrint(jsonObject,System.out);
+
+                    QueryPrivacyGroupPayload queryPrivacyGroupPayload = cborObjectMapper.readValue(valueData, QueryPrivacyGroupPayload.class);
+                    queryPrivacyGroupPayloads.add(queryPrivacyGroupPayload);
+                    System.out.print("=== Added ===");
+                    continue;
+                }
+            }
+
+
+
+
+            DBIterator iterator = levelDBStore.iterator();
             for (iterator.seekToFirst(); iterator.hasNext(); iterator.next()) {
 
                 Map.Entry<byte[], byte[]> entry = iterator.peekNext();
 
+                String messageHash = Base64.getEncoder().encodeToString(entry.getKey());
+                String contents = Base64.getEncoder().encodeToString(entry.getValue());
+
+                System.out.println("Begin messageHash "+ messageHash +" = "+ contents);
+
+
                 byte[] keyData = entry.getKey();
                 byte[] valueData = entry.getValue();
                 try {
+
                     JsonObject jsonObject = cborObjectMapper.readValue(valueData, JsonObject.class);
-                    JsonUtil.prettyPrint(jsonObject, System.out);
+
+                    if (jsonObject.containsKey("addresses")) {
+                        System.out.println("=== Address thing ====");
+                        JsonUtil.prettyPrint(jsonObject,System.out);
+                        System.out.println("=== End Address thing ====");
+                        continue;
+                    }
 
                     EncryptedPayload encryptedPayload = cborObjectMapper.readValue(valueData, EncryptedPayload.class);
 
-                    String sender1 = Base64.getEncoder().encodeToString(encryptedPayload.sender().bytesArray());
+                    byte[] txnDataB = encryptedPayload.cipherText();
 
-
-                    String nonce = Base64.getEncoder().encodeToString(encryptedPayload.nonce());
-
-                    EncryptedTransaction encryptedTransaction = new EncryptedTransaction();
-                    encryptedTransaction.setHash(new MessageHash(keyData));
-
-
-                    PayloadEncoder encoder = PayloadEncoder.create();
-                    EncodedPayload encodedPayload = EncodedPayload.Builder.create()
-                            .withPrivacyMode(PrivacyMode.STANDARD_PRIVATE)
-
-                            .build();
+                    PublicKey senderKey = Optional.of(encryptedPayload.sender())
+                            .map(Box.PublicKey::bytesArray)
+                            .map(PublicKey::from).get();
 
 
 
-                  //  JsonUtil.prettyPrint(jsonObject, System.out);
+                    Map<EncryptedKey,Box.KeyPair> encryptedKeyKeyPairMap = orionKeyHelper.findRecipientKeyPairs(encryptedPayload);
+                    if(encryptedKeyKeyPairMap.isEmpty() || (encryptedKeyKeyPairMap.size() != encryptedPayload.encryptedKeys().length))  {
+                        dodgeyList.add(jsonObject);
+                        continue;
+                    }
+
+                    String privGrpId = Base64.getEncoder().encodeToString(encryptedPayload.privacyGroupId());
+                    System.out.println("encryptedPayload.privacyGroupId : "+ privGrpId);
+
+                    QueryPrivacyGroupPayload queryPrivacyGroupPayload = queryPrivacyGroupPayloads.stream()
+                           .peek(o -> System.out.println(o.privacyGroupId()))
+                           .filter(q -> q.privacyGroupId().contains(Base64.getEncoder().encodeToString(encryptedPayload.privacyGroupId())))
+                            .reduce((l,r) -> {
+                                throw new IllegalStateException("There can only be one "+ l);
+                            }).orElse(null);
+
+
+                    for (EncryptedKey encryptedKey : encryptedKeyKeyPairMap.keySet()) {
+
+                        Box.KeyPair recipientKeyPair = encryptedKeyKeyPairMap.get(encryptedKey);
+
+                        PrivateKey privateKey = PrivateKey.from(recipientKeyPair.secretKey().bytesArray());
+
+                        SharedKey sharedKey = tesseraEncrpter.computeSharedKey(senderKey, privateKey);
+
+                        Nonce nonce = new Nonce(encryptedPayload.nonce());
+                        byte[] decryptedKeyData = tesseraEncrpter.openAfterPrecomputation(encryptedKey.getEncoded(), nonce, sharedKey);
+
+                        SharedKey masterKey = SharedKey.from(decryptedKeyData);
+
+                        byte[] txn = tesseraEncrpter.openAfterPrecomputation(txnDataB, new Nonce(new byte[24]), masterKey);
+
+                    }
+
+                        EncodedPayload encodedPayload = EncodedPayload.Builder.create()
+                              //  .withExecHash(txn)
+                                .withCipherText(encryptedPayload.cipherText())
+                                .withCipherTextNonce(new Nonce(new byte[24]))
+                                .withPrivacyMode(PrivacyMode.STANDARD_PRIVATE)
+                                .withSenderKey(senderKey)
+                                .withRecipientKeys(encryptedKeyKeyPairMap.values().stream()
+                                        .map(Box.KeyPair::publicKey)
+                                        .map(Box.PublicKey::bytesArray)
+                                        .map(PublicKey::from)
+                                        .collect(Collectors.toList()))
+                                .withRecipientNonce(encryptedPayload.nonce())
+                                .build();
+
+                        PayloadEncoder payloadEncoder = PayloadEncoder.create();
+                        byte[] encodedPayloadData = payloadEncoder.encode(encodedPayload);
+
+                        EncryptedTransaction tesseraEncryptedTxn = new EncryptedTransaction();
+                        tesseraEncryptedTxn.setEncodedPayload(encodedPayloadData);
+                        tesseraEncryptedTxn.setHash(new MessageHash(keyData));
+
+                        System.out.println("Save "+ tesseraEncryptedTxn);
+                        System.out.println("Saved messageHash "+ messageHash +" = "+ contents);
+                       // JsonUtil.prettyPrint(jsonObject,System.out);
+                        System.out.println("Save sender "+ senderKey.encodeToBase64());
+                        encryptedKeyKeyPairMap.values().stream()
+                                .map(Box.KeyPair::publicKey)
+                                .map(Box.PublicKey::bytesArray)
+                                .map(Base64.getEncoder()::encodeToString)
+                                .forEach(v -> System.out.println("Save Recipient "+ v));
+
 
                 } catch (IOException ex) {
-                    //  throw new UncheckedIOException(ex);
+                    throw new UncheckedIOException(ex);
                 }
 
             }
 
-
-            System.out.println(iterator.hasNext());
-
-            iterator.forEachRemaining(entry -> {
-                System.out.println(entry);
-//                byte[] keyData = entry.getKey();
-//                byte[] valueData = entry.getValue();
-//                try {
-//                    JsonObject storedJson = cborObjectMapper.readValue(valueData, JsonObject.class);
-//                    //routerdb
-//
-//                    System.out.println(storedJson);
-//                } catch (IOException ex) {
-//                    throw new UncheckedIOException(ex);
-//                }
-
+            dodgeyList.forEach(jsonObject -> {
+                System.out.println("====== Unable to process ======");
+                JsonUtil.prettyPrint(jsonObject,System.out);
+                System.out.println("====== End Unable to process ======");
             });
+
+
+            System.out.println(" Unable to process "+ dodgeyList.size());
+
+
         }
 
 

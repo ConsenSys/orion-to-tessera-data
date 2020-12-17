@@ -59,7 +59,7 @@ dependencies {
 
     implementation("net.consensys.quorum.tessera:argon2:20.10.0")
 
-    implementation("net.consensys.quorum.tessera:key-generation:20.10.0")
+    implementation("net.consensys.quorum.tessera:key-generation:1.0.10-SNAPSHOT")
 
     implementation "org.bouncycastle:bcpkix-jdk15on:1.64"
     implementation "org.bouncycastle:bcprov-jdk15on:1.64"
