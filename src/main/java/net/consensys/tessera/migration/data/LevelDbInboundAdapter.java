@@ -191,72 +191,121 @@ public class LevelDbInboundAdapter implements InboundAdapter {
                             .map(Box.PublicKey::bytesArray)
                             .map(PublicKey::from).get();
 
-
-
-                    Map<EncryptedKey,Box.KeyPair> encryptedKeyKeyPairMap = orionKeyHelper.findRecipientKeyPairs(encryptedPayload);
-                    if(encryptedKeyKeyPairMap.isEmpty() || (encryptedKeyKeyPairMap.size() != encryptedPayload.encryptedKeys().length))  {
-                        dodgeyList.add(jsonObject);
-                        continue;
-                    }
-
-                    String privGrpId = Base64.getEncoder().encodeToString(encryptedPayload.privacyGroupId());
-                    System.out.println("encryptedPayload.privacyGroupId : "+ privGrpId);
-
                     QueryPrivacyGroupPayload queryPrivacyGroupPayload = queryPrivacyGroupPayloads.stream()
                            .peek(o -> System.out.println(o.privacyGroupId()))
                            .filter(q -> q.privacyGroupId().contains(Base64.getEncoder().encodeToString(encryptedPayload.privacyGroupId())))
                             .reduce((l,r) -> {
                                 throw new IllegalStateException("There can only be one "+ l);
                             }).orElse(null);
+                    if (queryPrivacyGroupPayload == null) {
+                        //TODO: find out why it might be the case we can't find the privacy group id
+                        dodgeyList.add(jsonObject);
+                        continue;
+                    }
+
+                    boolean weAreSender = orionKeyHelper.getKeyPairs()
+                            .stream()
+                            .map(Box.KeyPair::publicKey)
+                            .anyMatch(k -> Objects.equals(k, encryptedPayload.sender()));
+
+                    List<PublicKey> recipientKeys = new ArrayList<>();
+                    List<byte[]> recipientBoxes = new ArrayList<>();
+
+                    if (weAreSender) {
+                        //we are the sender of this tx, so we have all of the encrypted master keys
+                        //the keys listed in the privacy group should be in the same order as they are
+                        //used for the EncryptedKey, so just iterate over them to test it
+                        for (int i = 0; i < encryptedPayload.encryptedKeys().length; i++) {
+                            EncryptedKey encryptedKey = encryptedPayload.encryptedKeys()[i];
+
+                            String keyB64 = queryPrivacyGroupPayload.addresses()[i];
+                            PublicKey recipientKey = PublicKey.from(Base64.getDecoder().decode(keyB64));
+
+                            PrivateKey privateKey = orionKeyHelper.getKeyPairs()
+                                    .stream()
+                                    .filter(kp -> kp.publicKey().equals(encryptedPayload.sender()))
+                                    .findFirst()
+                                    .map(Box.KeyPair::secretKey)
+                                    .map(Box.SecretKey::bytesArray)
+                                    .map(PrivateKey::from)
+                                    .get();
+
+                            SharedKey sharedKey = tesseraEncrpter.computeSharedKey(recipientKey, privateKey);
+
+                            Nonce nonce = new Nonce(encryptedPayload.nonce());
+                            byte[] decryptedKeyData = tesseraEncrpter.openAfterPrecomputation(encryptedKey.getEncoded(), nonce, sharedKey);
+
+                            SharedKey masterKey = SharedKey.from(decryptedKeyData);
+
+                            //this isn't used anywhere, but acts as a sanity check we got all the keys right.
+                            byte[] txn = tesseraEncrpter.openAfterPrecomputation(txnDataB, new Nonce(new byte[24]), masterKey);
+
+                            //hasn't blown up, so must be a success
+                            recipientKeys.add(recipientKey);
+                            recipientBoxes.add(encryptedKey.getEncoded());
+                        }
+                    } else {
+
+                        //TODO: hard-coded key 0 since we only have one key to test with
+                        //TODO: but we should be looping over each of our locked keys and trying
+                        //TODO: until we get a match, then we can add to the recipient box/key list
+
+                        //TODO: the only keys we need to try will be: our locked keys and exist in the privacy group
 
 
-                    for (EncryptedKey encryptedKey : encryptedKeyKeyPairMap.keySet()) {
+                        for (int i = 0; i < encryptedPayload.encryptedKeys().length; i++) {
+                            EncryptedKey encryptedKey = encryptedPayload.encryptedKeys()[i];
 
-                        Box.KeyPair recipientKeyPair = encryptedKeyKeyPairMap.get(encryptedKey);
+                            Box.KeyPair keypairUnderTest = orionKeyHelper.getKeyPairs().get(0);
+                            PublicKey ourPublicKey = PublicKey.from(keypairUnderTest.publicKey().bytesArray());
+                            PrivateKey ourPrivateKey = PrivateKey.from(keypairUnderTest.secretKey().bytesArray());
 
-                        PrivateKey privateKey = PrivateKey.from(recipientKeyPair.secretKey().bytesArray());
+                            SharedKey sharedKey = tesseraEncrpter.computeSharedKey(senderKey, ourPrivateKey);
 
-                        SharedKey sharedKey = tesseraEncrpter.computeSharedKey(senderKey, privateKey);
+                            Nonce nonce = new Nonce(encryptedPayload.nonce());
+                            byte[] decryptedKeyData = tesseraEncrpter.openAfterPrecomputation(encryptedKey.getEncoded(), nonce, sharedKey);
 
-                        Nonce nonce = new Nonce(encryptedPayload.nonce());
-                        byte[] decryptedKeyData = tesseraEncrpter.openAfterPrecomputation(encryptedKey.getEncoded(), nonce, sharedKey);
+                            SharedKey masterKey = SharedKey.from(decryptedKeyData);
 
-                        SharedKey masterKey = SharedKey.from(decryptedKeyData);
+                            //this isn't used anywhere, but acts as a sanity check we got all the keys right.
+                            byte[] txn = tesseraEncrpter.openAfterPrecomputation(txnDataB, new Nonce(new byte[24]), masterKey);
 
-                        byte[] txn = tesseraEncrpter.openAfterPrecomputation(txnDataB, new Nonce(new byte[24]), masterKey);
+                            //hasn't blown up, so must be a success
+                            recipientKeys.add(ourPublicKey);
+                            recipientBoxes.add(encryptedKey.getEncoded());
+                        }
 
                     }
 
-                        EncodedPayload encodedPayload = EncodedPayload.Builder.create()
-                              //  .withExecHash(txn)
-                                .withCipherText(encryptedPayload.cipherText())
-                                .withCipherTextNonce(new Nonce(new byte[24]))
-                                .withPrivacyMode(PrivacyMode.STANDARD_PRIVATE)
-                                .withSenderKey(senderKey)
-                                .withRecipientKeys(encryptedKeyKeyPairMap.values().stream()
-                                        .map(Box.KeyPair::publicKey)
-                                        .map(Box.PublicKey::bytesArray)
-                                        .map(PublicKey::from)
-                                        .collect(Collectors.toList()))
-                                .withRecipientNonce(encryptedPayload.nonce())
-                                .build();
+                    EncodedPayload encodedPayload = EncodedPayload.Builder.create()
+                            .withCipherText(encryptedPayload.cipherText())
+                            .withCipherTextNonce(new Nonce(new byte[24]))
+                            .withPrivacyMode(PrivacyMode.STANDARD_PRIVATE)
+                            .withSenderKey(senderKey)
+                            .withRecipientBoxes(recipientBoxes)
+                            .withRecipientKeys(recipientKeys)
+                            .withRecipientNonce(encryptedPayload.nonce())
+                            .build();
 
                         PayloadEncoder payloadEncoder = PayloadEncoder.create();
                         byte[] encodedPayloadData = payloadEncoder.encode(encodedPayload);
 
                         EncryptedTransaction tesseraEncryptedTxn = new EncryptedTransaction();
                         tesseraEncryptedTxn.setEncodedPayload(encodedPayloadData);
+
+                        //TODO: check how this hash is generated
+                        //it is not SHA3-512 of the ciphertext
                         tesseraEncryptedTxn.setHash(new MessageHash(keyData));
 
                         System.out.println("Save "+ tesseraEncryptedTxn);
                         System.out.println("Saved messageHash "+ messageHash +" = "+ contents);
                        // JsonUtil.prettyPrint(jsonObject,System.out);
                         System.out.println("Save sender "+ senderKey.encodeToBase64());
-                        encryptedKeyKeyPairMap.values().stream()
-                                .map(Box.KeyPair::publicKey)
-                                .map(Box.PublicKey::bytesArray)
-                                .map(Base64.getEncoder()::encodeToString)
-                                .forEach(v -> System.out.println("Save Recipient "+ v));
+//                        encryptedKeyKeyPairMap.values().stream()
+//                                .map(Box.KeyPair::publicKey)
+//                                .map(Box.PublicKey::bytesArray)
+//                                .map(Base64.getEncoder()::encodeToString)
+//                                .forEach(v -> System.out.println("Save Recipient "+ v));
 
 
                 } catch (IOException ex) {
