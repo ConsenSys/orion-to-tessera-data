@@ -3,8 +3,6 @@ package net.consensys.tessera.migration.data;
 import com.quorum.tessera.encryption.*;
 import net.consensys.orion.enclave.EncryptedKey;
 import net.consensys.orion.enclave.EncryptedPayload;
-import net.consensys.orion.enclave.PrivacyGroupPayload;
-import net.consensys.orion.enclave.QueryPrivacyGroupPayload;
 import org.apache.tuweni.crypto.sodium.Box;
 
 import java.util.*;
@@ -21,11 +19,20 @@ public class EncryptedKeyMatcher {
         this.tesseraEncryptor = Objects.requireNonNull(tesseraEncryptor);
     }
 
-    public List<PublicKey> match(final EncryptedPayload transaction, final PrivacyGroupPayload privacyGroup, final boolean weAreSender) {
-        if (!weAreSender) {
-            return handleWhenNotSender(transaction, Arrays.asList(privacyGroup.addresses()));
-        }
+    public List<PublicKey> match(final EncryptedPayload transaction, final List<String> privacyGroupAddresses) {
+        final boolean weAreSender = orionKeyHelper.getKeyPairs()
+                .stream()
+                .map(Box.KeyPair::publicKey)
+                .anyMatch(k -> Objects.equals(k, transaction.sender()));
 
+        if (weAreSender) {
+            return handleWhenSender(transaction, privacyGroupAddresses);
+        }
+        return handleWhenNotSender(transaction, privacyGroupAddresses);
+    }
+
+    private List<PublicKey> handleWhenSender(final EncryptedPayload transaction,
+                                             final List<String> privacyGroupAddresses) {
         List<PublicKey> recipientKeys = new ArrayList<>();
 
         //we are the sender of this tx, so we have all of the encrypted master keys
@@ -44,7 +51,7 @@ public class EncryptedKeyMatcher {
         for (int i = 0; i < transaction.encryptedKeys().length; i++) {
             EncryptedKey encryptedKey = transaction.encryptedKeys()[i];
 
-            for (String possibleRecipientPublicKey : privacyGroup.addresses()) {
+            for (String possibleRecipientPublicKey : privacyGroupAddresses) {
                 PublicKey recipientKey = PublicKey.from(Base64.getDecoder().decode(possibleRecipientPublicKey));
 
                 final boolean canDecrypt = canDecrypt(transaction, encryptedKey, recipientKey, privateKey);
@@ -63,47 +70,6 @@ public class EncryptedKeyMatcher {
                 //TODO: make a proper error
                 throw new RuntimeException("could not find a local recipient key to decrypt the payload with");
             }
-        }
-
-        return recipientKeys;
-    }
-
-    public List<PublicKey> match(final EncryptedPayload transaction,
-                                 final QueryPrivacyGroupPayload privacyGroup,
-                                 final boolean weAreSender) {
-
-        if (!weAreSender) {
-            return handleWhenNotSender(transaction, Arrays.asList(privacyGroup.addresses()));
-        }
-
-        List<PublicKey> recipientKeys = new ArrayList<>();
-
-        //we are the sender of this tx, so we have all of the encrypted master keys
-        //the keys listed in the privacy group should be in the same order as they are
-        //used for the EncryptedKey, so just iterate over them to test it
-        for (int i = 0; i < transaction.encryptedKeys().length; i++) {
-            EncryptedKey encryptedKey = transaction.encryptedKeys()[i];
-
-            String recipientKeyB64 = privacyGroup.addresses()[i];
-            PublicKey recipientKey = PublicKey.from(Base64.getDecoder().decode(recipientKeyB64));
-
-            PrivateKey privateKey = orionKeyHelper.getKeyPairs()
-                    .stream()
-                    .filter(kp -> kp.publicKey().equals(transaction.sender()))
-                    .findFirst()
-                    .map(Box.KeyPair::secretKey)
-                    .map(Box.SecretKey::bytesArray)
-                    .map(PrivateKey::from)
-                    .orElseThrow(() -> new IllegalStateException("local sender key not found"));
-
-            final boolean canDecrypt = canDecrypt(transaction, encryptedKey, recipientKey, privateKey);
-
-            if (!canDecrypt) {
-                throw new IllegalStateException("tx we sent cannot be decrypted using private key");
-            }
-
-            //hasn't blown up, so must be a success
-            recipientKeys.add(recipientKey);
         }
 
         return recipientKeys;

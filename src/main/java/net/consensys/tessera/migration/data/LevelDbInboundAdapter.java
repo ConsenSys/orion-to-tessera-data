@@ -201,23 +201,21 @@ public class LevelDbInboundAdapter implements InboundAdapter {
                         continue;
                     }
 
-                    boolean weAreSender = orionKeyHelper.getKeyPairs()
-                            .stream()
-                            .map(Box.KeyPair::publicKey)
-                            .anyMatch(k -> Objects.equals(k, encryptedPayload.sender()));
-
                     EncryptedKeyMatcher matcher = new EncryptedKeyMatcher(orionKeyHelper, tesseraEncrpter);
-                    List<PublicKey> recipientKeys = matcher.match(encryptedPayload, queryPrivacyGroupPayload, weAreSender);
+                    List<PublicKey> recipientKeys = matcher.match(encryptedPayload, Arrays.asList(queryPrivacyGroupPayload.addresses()));
                     List<byte[]> recipientBoxes = Arrays.stream(encryptedPayload.encryptedKeys())
                             .map(EncryptedKey::getEncoded)
                             .collect(Collectors.toList());
 
                     {
+                        //this is alternate method that uses the PrivacyGroupPayload instead
+
                         byte[] privacyGroupId = Base64.getEncoder().encodeToString(encryptedPayload.privacyGroupId()).getBytes();
                         byte[] rawPrivacyGroupSeed = levelDBStore.get(privacyGroupId);
                         PrivacyGroupPayload payload = cborObjectMapper.readValue(rawPrivacyGroupSeed, PrivacyGroupPayload.class);
-                        List<PublicKey> other = matcher.match(encryptedPayload, payload, weAreSender);
+                        List<PublicKey> other = matcher.match(encryptedPayload, Arrays.asList(payload.addresses()));
 
+                        // check the result is the same
                         if(other.size() != recipientKeys.size()) {
                             throw new RuntimeException();
                         }
