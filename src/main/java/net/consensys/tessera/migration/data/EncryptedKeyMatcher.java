@@ -22,8 +22,6 @@ public class EncryptedKeyMatcher {
     }
 
     public List<PublicKey> match(final EncryptedPayload transaction, final PrivacyGroupPayload privacyGroup, final boolean weAreSender) {
-        final byte[] txCipherText = transaction.cipherText();
-
         List<PublicKey> recipientKeys = new ArrayList<>();
 
         PublicKey senderKey = Optional.of(transaction.sender())
@@ -50,32 +48,19 @@ public class EncryptedKeyMatcher {
                 for (String possibleRecipientPublicKey : privacyGroup.addresses()) {
                     PublicKey recipientKey = PublicKey.from(Base64.getDecoder().decode(possibleRecipientPublicKey));
 
-                    SharedKey sharedKey = tesseraEncryptor.computeSharedKey(recipientKey, privateKey);
+                    final boolean canDecrypt = canDecrypt(transaction, encryptedKey, recipientKey, privateKey);
 
-                    Nonce nonce = new Nonce(transaction.nonce());
+                    if (canDecrypt) {
+                        //hasn't blown up, so must be a success
+                        recipientKeys.add(recipientKey);
 
-                    byte[] decryptedKeyData;
-                    try {
-                        decryptedKeyData = tesseraEncryptor.openAfterPrecomputation(encryptedKey.getEncoded(), nonce, sharedKey);
-                    } catch (EncryptorException e) {
-                        // Wrong key, keep trying the others.
-                        continue;
+                        // Found the correct key, no need to keep trying others
+                        break;
                     }
-
-                    SharedKey masterKey = SharedKey.from(decryptedKeyData);
-
-                    //this isn't used anywhere, but acts as a sanity check we got all the keys right.
-                    byte[] txn = tesseraEncryptor.openAfterPrecomputation(txCipherText, new Nonce(new byte[24]), masterKey);
-
-                    //hasn't blown up, so must be a success
-                    recipientKeys.add(recipientKey);
-
-                    // Found the correct key, no need to keep trying others
-                    break;
                 }
 
                 //check we actually found a relevant key
-                if (recipientKeys.size() != (i+1)) {
+                if (recipientKeys.size() != (i + 1)) {
                     //TODO: make a proper error
                     throw new RuntimeException("could not find a local recipient key to decrypt the payload with");
                 }
@@ -92,9 +77,6 @@ public class EncryptedKeyMatcher {
                     .collect(Collectors.toList());
             ourPossibleRecipientKeys.removeIf(k -> !ourPublicKeysBase64.contains(k));
 
-            // TODO: maybe find out if the keys we are going to test are in order
-            // TODO: but maybe it doesn't really matter and just brute force it
-
             for (int i = 0; i < transaction.encryptedKeys().length; i++) {
                 EncryptedKey encryptedKey = transaction.encryptedKeys()[i];
 
@@ -108,32 +90,19 @@ public class EncryptedKeyMatcher {
                     PublicKey ourPublicKey = PublicKey.from(keypairUnderTest.publicKey().bytesArray());
                     PrivateKey ourPrivateKey = PrivateKey.from(keypairUnderTest.secretKey().bytesArray());
 
-                    SharedKey sharedKey = tesseraEncryptor.computeSharedKey(senderKey, ourPrivateKey);
+                    final boolean canDecrypt = canDecrypt(transaction, encryptedKey, senderKey, ourPrivateKey);
 
-                    Nonce nonce = new Nonce(transaction.nonce());
+                    if (canDecrypt) {
+                        //hasn't blown up, so must be a success
+                        recipientKeys.add(ourPublicKey);
 
-                    byte[] decryptedKeyData;
-                    try {
-                        decryptedKeyData = tesseraEncryptor.openAfterPrecomputation(encryptedKey.getEncoded(), nonce, sharedKey);
-                    } catch (EncryptorException e) {
-                        // Wrong key, keep trying the others.
-                        continue;
+                        // Found the correct key, no need to keep trying others
+                        break;
                     }
-
-                    SharedKey masterKey = SharedKey.from(decryptedKeyData);
-
-                    //this isn't used anywhere, but acts as a sanity check we got all the keys right.
-                    byte[] txn = tesseraEncryptor.openAfterPrecomputation(txCipherText, new Nonce(new byte[24]), masterKey);
-
-                    //hasn't blown up, so must be a success
-                    recipientKeys.add(ourPublicKey);
-
-                    // Found the correct key, no need to keep trying others
-                    break;
                 }
 
                 //check we actually found a relevant key
-                if (recipientKeys.size() != (i+1)) {
+                if (recipientKeys.size() != (i + 1)) {
                     //TODO: make a proper error
                     throw new RuntimeException("could not find a local recipient key to decrypt the payload with");
                 }
@@ -146,8 +115,6 @@ public class EncryptedKeyMatcher {
     public List<PublicKey> match(final EncryptedPayload transaction,
                                  final QueryPrivacyGroupPayload privacyGroup,
                                  final boolean weAreSender) {
-
-        final byte[] txCipherText = transaction.cipherText();
 
         List<PublicKey> recipientKeys = new ArrayList<>();
 
@@ -174,15 +141,11 @@ public class EncryptedKeyMatcher {
                         .map(PrivateKey::from)
                         .orElseThrow(() -> new IllegalStateException("local sender key not found"));
 
-                SharedKey sharedKey = tesseraEncryptor.computeSharedKey(recipientKey, privateKey);
+                final boolean canDecrypt = canDecrypt(transaction, encryptedKey, recipientKey, privateKey);
 
-                Nonce nonce = new Nonce(transaction.nonce());
-                byte[] decryptedKeyData = tesseraEncryptor.openAfterPrecomputation(encryptedKey.getEncoded(), nonce, sharedKey);
-
-                SharedKey masterKey = SharedKey.from(decryptedKeyData);
-
-                //this isn't used anywhere, but acts as a sanity check we got all the keys right.
-                byte[] txn = tesseraEncryptor.openAfterPrecomputation(txCipherText, new Nonce(new byte[24]), masterKey);
+                if (!canDecrypt) {
+                    throw new IllegalStateException("tx we sent cannot be decrypted using private key");
+                }
 
                 //hasn't blown up, so must be a success
                 recipientKeys.add(recipientKey);
@@ -215,32 +178,19 @@ public class EncryptedKeyMatcher {
                     PublicKey ourPublicKey = PublicKey.from(keypairUnderTest.publicKey().bytesArray());
                     PrivateKey ourPrivateKey = PrivateKey.from(keypairUnderTest.secretKey().bytesArray());
 
-                    SharedKey sharedKey = tesseraEncryptor.computeSharedKey(senderKey, ourPrivateKey);
+                    final boolean canDecrypt = canDecrypt(transaction, encryptedKey, senderKey, ourPrivateKey);
 
-                    Nonce nonce = new Nonce(transaction.nonce());
+                    if (canDecrypt) {
+                        //hasn't blown up, so must be a success
+                        recipientKeys.add(ourPublicKey);
 
-                    byte[] decryptedKeyData;
-                    try {
-                        decryptedKeyData = tesseraEncryptor.openAfterPrecomputation(encryptedKey.getEncoded(), nonce, sharedKey);
-                    } catch (EncryptorException e) {
-                        // Wrong key, keep trying the others.
-                        continue;
+                        // Found the correct key, no need to keep trying others
+                        break;
                     }
-
-                    SharedKey masterKey = SharedKey.from(decryptedKeyData);
-
-                    //this isn't used anywhere, but acts as a sanity check we got all the keys right.
-                    byte[] txn = tesseraEncryptor.openAfterPrecomputation(txCipherText, new Nonce(new byte[24]), masterKey);
-
-                    //hasn't blown up, so must be a success
-                    recipientKeys.add(ourPublicKey);
-
-                    // Found the correct key, no need to keep trying others
-                    break;
                 }
 
                 //check we actually found a relevant key
-                if (recipientKeys.size() != (i+1)) {
+                if (recipientKeys.size() != (i + 1)) {
                     //TODO: make a proper error
                     throw new RuntimeException("could not find a local recipient key to decrypt the payload with");
                 }
@@ -248,5 +198,34 @@ public class EncryptedKeyMatcher {
         }
 
         return recipientKeys;
+    }
+
+    private boolean canDecrypt(final EncryptedPayload transaction,
+                              final EncryptedKey encryptedKey,
+                              final PublicKey publicKey,
+                              final PrivateKey ourPrivateKey) {
+
+        // "publicKey" may either be the recipient public key (if we were the sender),
+        // or the tx sender public key (if we were a recipient)
+
+        final SharedKey sharedKey = tesseraEncryptor.computeSharedKey(publicKey, ourPrivateKey);
+
+        final Nonce nonce = new Nonce(transaction.nonce());
+
+        final byte[] decryptedKeyData;
+        try {
+            decryptedKeyData = tesseraEncryptor.openAfterPrecomputation(encryptedKey.getEncoded(), nonce, sharedKey);
+        } catch (EncryptorException e) {
+            // Wrong key, keep trying the others.
+            return false;
+        }
+
+        final SharedKey masterKey = SharedKey.from(decryptedKeyData);
+
+        //this isn't used anywhere, but acts as a sanity check we got all the keys right.
+        //TODO: this should not fail, but if it does, do we want to catch the exception or let it blow up?
+        tesseraEncryptor.openAfterPrecomputation(transaction.cipherText(), new Nonce(new byte[24]), masterKey);
+
+        return true;
     }
 }
