@@ -24,6 +24,7 @@ import com.quorum.tessera.passwords.PasswordReader;
 import net.consensys.orion.config.Config;
 import net.consensys.orion.enclave.EncryptedKey;
 import net.consensys.orion.enclave.EncryptedPayload;
+import net.consensys.orion.enclave.PrivacyGroupPayload;
 import net.consensys.orion.enclave.QueryPrivacyGroupPayload;
 import org.apache.tuweni.crypto.sodium.Box;
 import org.iq80.leveldb.DB;
@@ -135,7 +136,6 @@ public class LevelDbInboundAdapter implements InboundAdapter {
         List<JsonObject> dodgeyList = new ArrayList<>();
         try (levelDBStore) {
 
-
             DBIterator it = levelDBStore.iterator();
             List<QueryPrivacyGroupPayload> queryPrivacyGroupPayloads = new ArrayList<>();
             for (it.seekToFirst(); it.hasNext(); it.next()) {
@@ -185,8 +185,6 @@ public class LevelDbInboundAdapter implements InboundAdapter {
 
                     EncryptedPayload encryptedPayload = cborObjectMapper.readValue(valueData, EncryptedPayload.class);
 
-                    byte[] txnDataB = encryptedPayload.cipherText();
-
                     PublicKey senderKey = Optional.of(encryptedPayload.sender())
                             .map(Box.PublicKey::bytesArray)
                             .map(PublicKey::from).get();
@@ -208,102 +206,28 @@ public class LevelDbInboundAdapter implements InboundAdapter {
                             .map(Box.KeyPair::publicKey)
                             .anyMatch(k -> Objects.equals(k, encryptedPayload.sender()));
 
-                    List<PublicKey> recipientKeys = new ArrayList<>();
-                    List<byte[]> recipientBoxes = new ArrayList<>();
+                    EncryptedKeyMatcher matcher = new EncryptedKeyMatcher(orionKeyHelper, tesseraEncrpter);
+                    List<PublicKey> recipientKeys = matcher.match(encryptedPayload, queryPrivacyGroupPayload, weAreSender);
+                    List<byte[]> recipientBoxes = Arrays.stream(encryptedPayload.encryptedKeys())
+                            .map(EncryptedKey::getEncoded)
+                            .collect(Collectors.toList());
 
-                    if (weAreSender) {
-                        //we are the sender of this tx, so we have all of the encrypted master keys
-                        //the keys listed in the privacy group should be in the same order as they are
-                        //used for the EncryptedKey, so just iterate over them to test it
-                        for (int i = 0; i < encryptedPayload.encryptedKeys().length; i++) {
-                            EncryptedKey encryptedKey = encryptedPayload.encryptedKeys()[i];
+                    {
+                        byte[] privacyGroupId = Base64.getEncoder().encodeToString(encryptedPayload.privacyGroupId()).getBytes();
+                        byte[] rawPrivacyGroupSeed = levelDBStore.get(privacyGroupId);
+                        PrivacyGroupPayload payload = cborObjectMapper.readValue(rawPrivacyGroupSeed, PrivacyGroupPayload.class);
+                        List<PublicKey> other = matcher.match(encryptedPayload, payload, weAreSender);
 
-                            String recipientKeyB64 = queryPrivacyGroupPayload.addresses()[i];
-                            PublicKey recipientKey = PublicKey.from(Base64.getDecoder().decode(recipientKeyB64));
-
-                            PrivateKey privateKey = orionKeyHelper.getKeyPairs()
-                                    .stream()
-                                    .filter(kp -> kp.publicKey().equals(encryptedPayload.sender()))
-                                    .findFirst()
-                                    .map(Box.KeyPair::secretKey)
-                                    .map(Box.SecretKey::bytesArray)
-                                    .map(PrivateKey::from)
-                                    .orElseThrow(() -> new IllegalStateException("local sender key not found"));
-
-                            SharedKey sharedKey = tesseraEncrpter.computeSharedKey(recipientKey, privateKey);
-
-                            Nonce nonce = new Nonce(encryptedPayload.nonce());
-                            byte[] decryptedKeyData = tesseraEncrpter.openAfterPrecomputation(encryptedKey.getEncoded(), nonce, sharedKey);
-
-                            SharedKey masterKey = SharedKey.from(decryptedKeyData);
-
-                            //this isn't used anywhere, but acts as a sanity check we got all the keys right.
-                            byte[] txn = tesseraEncrpter.openAfterPrecomputation(txnDataB, new Nonce(new byte[24]), masterKey);
-
-                            //hasn't blown up, so must be a success
-                            recipientKeys.add(recipientKey);
-                            recipientBoxes.add(encryptedKey.getEncoded());
-                        }
-                    } else {
-
-                        // Find the intersection of the privacy groups public keys and our local keys
-                        // as those are the only keys that are relevant for us now
-                        final List<String> ourPossibleRecipientKeys = new ArrayList<>(Arrays.asList(queryPrivacyGroupPayload.addresses()));
-                        final List<String> ourPublicKeysBase64 = orionKeyHelper.getKeyPairs().stream()
-                                .map(Box.KeyPair::publicKey)
-                                .map(Box.PublicKey::bytesArray)
-                                .map(pkBytes -> Base64.getEncoder().encodeToString(pkBytes))
-                                .collect(Collectors.toList());
-                        ourPossibleRecipientKeys.removeIf(k -> !ourPublicKeysBase64.contains(k));
-
-                        // TODO: maybe find out if the keys we are going to test are in order
-                        // TODO: but maybe it doesn't really matter and just brute force it
-
-                        for (int i = 0; i < encryptedPayload.encryptedKeys().length; i++) {
-                            EncryptedKey encryptedKey = encryptedPayload.encryptedKeys()[i];
-
-                            // Try each of the keys to see which one actually
-                            for (String ourPublicRecipientKey : ourPossibleRecipientKeys) {
-
-                                Box.KeyPair keypairUnderTest = orionKeyHelper.getKeyPairs().stream()
-                                        .filter(kp -> Objects.equals(Base64.getEncoder().encodeToString(kp.publicKey().bytesArray()), ourPublicRecipientKey))
-                                        .findFirst()
-                                        .get();
-                                PublicKey ourPublicKey = PublicKey.from(keypairUnderTest.publicKey().bytesArray());
-                                PrivateKey ourPrivateKey = PrivateKey.from(keypairUnderTest.secretKey().bytesArray());
-
-                                SharedKey sharedKey = tesseraEncrpter.computeSharedKey(senderKey, ourPrivateKey);
-
-                                Nonce nonce = new Nonce(encryptedPayload.nonce());
-
-                                byte[] decryptedKeyData;
-                                try {
-                                    decryptedKeyData = tesseraEncrpter.openAfterPrecomputation(encryptedKey.getEncoded(), nonce, sharedKey);
-                                } catch (EncryptorException e) {
-                                    // Wrong key, keep trying the others.
-                                    continue;
-                                }
-
-                                SharedKey masterKey = SharedKey.from(decryptedKeyData);
-
-                                //this isn't used anywhere, but acts as a sanity check we got all the keys right.
-                                byte[] txn = tesseraEncrpter.openAfterPrecomputation(txnDataB, new Nonce(new byte[24]), masterKey);
-
-                                //hasn't blown up, so must be a success
-                                recipientKeys.add(ourPublicKey);
-                                recipientBoxes.add(encryptedKey.getEncoded());
-
-                                // Found the corret key, no need to keep trying others
-                                break;
-                            }
-
-                            //check we actually found a relevant key
-                            if (recipientKeys.size() != (i+1)) {
-                                //TODO: make a proper error
-                                throw new RuntimeException("could not find a local recipient key to decrypt the payload with");
-                            }
+                        if(other.size() != recipientKeys.size()) {
+                            throw new RuntimeException();
                         }
 
+                        for(int i = 0; i < other.size(); i++) {
+                            boolean eq = Objects.equals(other.get(i).encodeToBase64(), recipientKeys.get(i).encodeToBase64());
+                            if (!eq) {
+                                throw new RuntimeException();
+                            }
+                        }
                     }
 
                     EncodedPayload encodedPayload = EncodedPayload.Builder.create()
