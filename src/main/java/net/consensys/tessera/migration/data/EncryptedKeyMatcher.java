@@ -136,6 +136,9 @@ public class EncryptedKeyMatcher {
         // "publicKey" may either be the recipient public key (if we were the sender),
         // or the tx sender public key (if we were a recipient)
 
+
+        System.out.printf("Create sharedKey from %s and %s",publicKey.encodeToBase64(),ourPrivateKey.encodeToBase64());
+        System.out.println();
         final SharedKey sharedKey = tesseraEncryptor.computeSharedKey(publicKey, ourPrivateKey);
 
         final Nonce nonce = new Nonce(transaction.nonce());

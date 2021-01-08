@@ -118,6 +118,8 @@ dependencies {
     }
     runtimeOnly "org.glassfish.jaxb:jaxb-runtime:2.3.3"
 
+    testImplementation "com.h2database:h2:1.4.200"
+
 }
 
 test {

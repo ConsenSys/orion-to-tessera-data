@@ -39,7 +39,9 @@ public class OrionKeyHelper {
     }
 
     public List<Box.KeyPair> getKeyPairs() {
-        return List.copyOf(keyPairLookup.values());
+        return keyPairLookup.values().stream()
+                .sorted(Comparator.comparing(k -> k.publicKey().hashCode()))
+                .collect(Collectors.toList());
     }
 
     public List<String> getPasswords() {
@@ -107,6 +109,11 @@ public class OrionKeyHelper {
                         byte[] o = Box.decrypt(key.getEncoded(), senderPublicKey, keyPair.secretKey(), nonce);
                         return Objects.nonNull(o);
                 }).findFirst();
+    }
+
+    Optional<Box.SecretKey> findPrivateKey(Box.PublicKey publicKey) {
+        return getKeyPairs().stream().filter(p -> p.publicKey().equals(publicKey))
+                .findFirst().map(Box.KeyPair::secretKey);
     }
 
     public Config getConfig() {

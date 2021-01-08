@@ -8,25 +8,40 @@ import com.quorum.tessera.enclave.PayloadEncoder;
 import com.quorum.tessera.enclave.PrivacyMode;
 import com.quorum.tessera.encryption.Nonce;
 import com.quorum.tessera.encryption.PublicKey;
+import net.consensys.orion.enclave.EncryptedKey;
 import net.consensys.orion.enclave.EncryptedPayload;
 import org.apache.tuweni.crypto.sodium.Box;
 
+import javax.persistence.EntityManager;
+import javax.persistence.EntityManagerFactory;
+import javax.persistence.PersistenceException;
 import java.util.*;
 import java.util.stream.Collectors;
 
-public class MigrateEventHandler implements EventHandler<OrionRecordEvent> {
-    @Override
-    public void onEvent(OrionRecordEvent event, long sequence, boolean endOfBatch) throws Exception {
+public class PersistEventHandler extends AbstractEventHandler {
 
-        Map<PublicKey,byte[]> recipientKeyToBoxes = event.getRecipientKeyToBoxes().entrySet()
+    private EntityManagerFactory entityManagerFactory;
+
+    public PersistEventHandler(EntityManagerFactory entityManagerFactory) {
+        this.entityManagerFactory = entityManagerFactory;
+    }
+
+    @Override
+    public void onEvent(OrionRecordEvent event) throws Exception {
+
+        System.out.println("MigrateEventHandler "+ event);
+
+        Map<PublicKey,EncryptedKey> recipientKeyToBoxes = event.getRecipientKeyToBoxes().entrySet()
                 .stream()
-                .sorted(Map.Entry.<String, byte[]>comparingByKey())
+                .sorted(Map.Entry.<String, EncryptedKey>comparingByKey())
                 .collect(
                         Collectors.toMap(e -> Optional.of(e.getKey())
                                 .map(Base64.getDecoder()::decode)
-                                .map(PublicKey::from).get(),
+                                .map(PublicKey::from)
+                                        .get(),
                                 e -> Optional.of(e.getValue())
-                                .map(Base64.getDecoder()::decode).get(),
+                              //  .map(Base64.getDecoder()::decode)
+                                        .get(),
                                     (l, r) -> l, LinkedHashMap::new));
 
         PublicKey sender = Optional.of(event)
@@ -49,7 +64,7 @@ public class MigrateEventHandler implements EventHandler<OrionRecordEvent> {
 
         EncodedPayload encodedPayload = EncodedPayload.Builder.create()
                 .withRecipientKeys(List.copyOf(recipientKeyToBoxes.keySet()))
-                .withRecipientBoxes(List.copyOf(recipientKeyToBoxes.values()))
+                .withRecipientBoxes(recipientKeyToBoxes.values().stream().map(EncryptedKey::getEncoded).collect(Collectors.toList()))
                 .withSenderKey(sender)
                 .withPrivacyMode(PrivacyMode.STANDARD_PRIVATE)
                 .withRecipientNonce(recipientNonce)
@@ -68,6 +83,17 @@ public class MigrateEventHandler implements EventHandler<OrionRecordEvent> {
                     .map(MessageHash::new).get();
 
         encryptedTransaction.setHash(messageHash);
+
+        EntityManager entityManager = entityManagerFactory.createEntityManager();
+
+        entityManager.getTransaction().begin();
+        try {
+            entityManager.persist(encryptedTransaction);
+            entityManager.getTransaction().commit();
+        } catch (PersistenceException ex) {
+            ex.printStackTrace();
+            entityManager.getTransaction().rollback();
+        }
 
         System.out.println("Save "+ encryptedTransaction);
 
